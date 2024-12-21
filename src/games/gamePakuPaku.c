@@ -189,7 +189,7 @@ static void update() {
                     (powerTicks > 0 ? 0.25 : (enemy.eyeVx != 0 ? 0.75 : 0.55)) *
                     difficulty,
       0, 100);
-  if ((enemy.eyeVx < 0 && enemy.x < 1) || (enemy.eyeVx > 0 & enemy.x > 99)) {
+  if ((enemy.eyeVx < 0 && enemy.x < 1) || (enemy.eyeVx > 0 && enemy.x > 99)) {
     enemy.eyeVx = 0;
   }
   if (enemy.eyeVx != 0) {

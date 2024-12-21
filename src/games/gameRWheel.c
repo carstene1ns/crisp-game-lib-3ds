@@ -178,7 +178,7 @@ static void update() {
     addWithAngle(vectorSet(&p, 50, 50), a, wheelRadius * (1 - s->height * 0.1));
     Vector bp;
     addWithAngle(vectorSet(&bp, 50, 50), a, wheelRadius);
-    float l = 0.05 + s->height * 0.1;
+    //float l = 0.05 + s->height * 0.1;
     Vector bp2;
     addWithAngle(vectorSet(&bp2, VEC_XY(bp)), a - M_PI / 2,
                  50 / RWHEEL_SPIKE_COUNT);

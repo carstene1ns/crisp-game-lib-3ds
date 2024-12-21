@@ -8,3 +8,6 @@ src/cglpPlaydate/crisp-games.pdx/
 src/cglpPlaydate/Source/pdex.bin
 src/cglpPlaydate/Source/pdex.dll
 src/cglpPlaydate/Source/pdex.elf
+src/cglp3ds/*.3dsx
+src/cglp3ds/*.elf
+src/cglp3ds/*.smdh

@@ -3,19 +3,55 @@
 #include <citro3d.h>
 #include <citro2d.h>
 #include <assert.h>
+#include <float.h>
 
 #include "cglp.h"
 #include "machineDependent.h"
 
+// gfx
 #define SCREEN_WIDTH  400
 #define SCREEN_HEIGHT 240
 static C3D_RenderTarget* top = NULL;
-//static struct timeval start;
-
 static int view_width = SCREEN_WIDTH;
 static int view_height = SCREEN_HEIGHT;
 static float z = 0.5f;
 static int a = 0xFF;
+
+// snd
+#define SAMPLERATE 22050
+#define SAMPLESPERBUF (SAMPLERATE / 30)
+#define NUMCHANS 8
+#define BYTESPERSAMPLE 4
+static ndspWaveBuf waveBuf[NUMCHANS];
+
+static Thread threadHandle;
+static LightEvent event;
+#define STACKSIZE (16 * 1024)
+static volatile bool runThread = true;
+
+typedef struct {
+  float freq;
+  float duration;
+  float when;
+} SoundTone;
+
+#define SOUND_TONE_COUNT 64
+static SoundTone soundTones[SOUND_TONE_COUNT];
+static int soundToneIndex = 0;
+
+static void initSoundTones() {
+  for (int i = 0; i < SOUND_TONE_COUNT; i++) {
+    soundTones[i].when = FLT_MAX;
+  }
+}
+
+static void addSoundTone(float freq, float duration, float when) {
+  SoundTone *st = &soundTones[soundToneIndex];
+  st->freq = freq;
+  st->duration = duration;
+  st->when = when;
+  soundToneIndex = (soundToneIndex + 1) % SOUND_TONE_COUNT;
+}
 
 // library implementation
 void md_drawRect(float x, float y, float w, float h, unsigned char r,
@@ -88,22 +124,16 @@ void md_clearScreen(unsigned char r, unsigned char g, unsigned char b) {
 }
 
 void md_playTone(float freq, float duration, float when) {
-
+  addSoundTone(freq, duration, when);
+  LightEvent_Signal(&event);
 }
 
 void md_stopTone() {
-
+  initSoundTones();
 }
 
 float md_getAudioTime() {
-  return (float)C3D_FrameCounter(0);
-
-  //struct timeval now;
-
-  //gettimeofday(&now, NULL);
-  //u32 ticks = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_usec - start.tv_usec) / 1000;
-
-  //return (float)ticks;
+  return (float)ndspGetFrameCount();
 }
 
 void md_initView(int w, int h) {
@@ -132,6 +162,70 @@ void md_consoleLog(char *msg) {
 }
 // end of library implementation
 
+static float lerp(float x, float x1, float x2, float y1, float y2) {
+  return y1 + (x-x1) * (y2-y1) / (x2-x1) ;
+}
+
+static float adsr(float sample, float t, float duration) {
+  float attackTime = 0.01;
+  float decayTime = 0.1;
+  float sustainGain = 0.5;
+  float releaseTime = 0.1;
+
+  if (t < attackTime) {
+    sample *= lerp(t, 0, attackTime, 0, 1);
+  } else if (t < attackTime + decayTime) {
+    sample *= lerp(t, attackTime, attackTime + decayTime, 1, sustainGain);
+  } else if (t < duration - releaseTime) {
+    sample *= sustainGain;
+  } else {
+    sample *= lerp(t, duration - releaseTime, duration, sustainGain, 0);
+  }
+  return sample;
+}
+
+static void fillBuffer(void *audioBuffer, size_t size, int frequency) {
+  u32 *dest = (u32*)audioBuffer;
+
+  for (int i = 0; i < size; i++) {
+    s16 sample = INT16_MAX * sin(frequency*(2*M_PI)*i/SAMPLERATE);
+    sample = adsr(sample, i, size);
+
+    dest[i] = (sample<<16) | (sample & 0xffff);
+  }
+
+  DSP_FlushDataCache(audioBuffer, size);
+}
+
+static void updateSound(void *arg) {
+  while(runThread) {
+    float lastWhen = 0;
+    for (int i = 0; i < SOUND_TONE_COUNT; i++) {
+      SoundTone *st = &soundTones[i];
+      if (st->when <= md_getAudioTime()) {
+        if (st->when > lastWhen) {
+          lastWhen = st->when;
+          st->when = FLT_MAX;
+
+          // find free channel
+          for (int i = 0; i < NUMCHANS; i++) {
+            if (waveBuf[i].status == NDSP_WBUF_DONE || waveBuf[i].status == NDSP_WBUF_FREE) {
+              memset(waveBuf[i].data_pcm16, 0, SAMPLESPERBUF*BYTESPERSAMPLE);
+              fillBuffer(waveBuf[i].data_pcm16, st->duration * 1000000, st->freq);
+
+              ndspChnWaveBufAdd(i, &waveBuf[i]);
+
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    LightEvent_Wait(&event);
+  }
+}
+
 // main
 int main(int argc, char **argv) {
   gfxInitDefault();
@@ -149,10 +243,31 @@ int main(int argc, char **argv) {
 
   top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 
-  //gettimeofday(&start, NULL);
+  initSoundTones();
+
+  ndspInit();
+  ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+  u32 *audioBuffer = (u32*)linearAlloc(SAMPLESPERBUF*BYTESPERSAMPLE*NUMCHANS);
+  float mix[12];
+  memset(mix, 0, sizeof(mix));
+  mix[0] = mix[1] = 0.8f;
+  for (int i = 0; i < NUMCHANS; i++) {
+    ndspChnReset(i);
+    ndspChnSetInterp(i, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(i, SAMPLERATE);
+    ndspChnSetFormat(i, NDSP_FORMAT_STEREO_PCM16);
+    ndspChnSetMix(i, mix);
+  }
+  memset(waveBuf, 0, sizeof(waveBuf));
+  for (int i = 0; i < NUMCHANS; i++) {
+    waveBuf[i].data_vaddr = &audioBuffer[SAMPLESPERBUF*i];
+    waveBuf[i].nsamples = SAMPLESPERBUF;
+    waveBuf[i].status = NDSP_WBUF_FREE;
+  }
+  LightEvent_Init(&event, RESET_ONESHOT);
+  threadHandle = threadCreate(updateSound, 0, STACKSIZE, 0x3f, -1, false);
 
   // init library
-  //disableSound();
   initGame();
 
   // main loop
@@ -196,6 +311,15 @@ int main(int argc, char **argv) {
     // finish rendering
     C3D_FrameEnd(0);
   }
+
+  runThread = false;
+  LightEvent_Signal(&event);
+  threadJoin(threadHandle, U64_MAX);
+  threadFree(threadHandle);
+
+  md_stopTone();
+  ndspExit();
+  linearFree(audioBuffer);
 
   // close services
   C2D_Fini();
